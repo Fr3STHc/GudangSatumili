@@ -667,9 +667,9 @@ function loanActionCount() {
     const u = currentUser();
     if (!u) return 0;
     if (u.role === 'admin') return db.loans.filter(l => l.status === 'menunggu_admin').length;
-    if (u.role === 'manajemen') return db.loans.filter(l => l.status === 'menunggu_admin' || l.status === 'menunggu_manajemen').length;
+    if (u.role === 'manajemen') return db.loans.filter(l => l.status === 'menunggu_manajemen_pengembalian').length;
     // staff: informasikan jumlah pengajuan miliknya yang masih menunggu
-    return db.loans.filter(l => l.requestedBy === u.name && (l.status === 'menunggu_admin' || l.status === 'menunggu_manajemen')).length;
+    return db.loans.filter(l => l.requestedBy === u.name && l.status === 'menunggu_admin').length;
 }
 function renderSidebar() {
     const nav = document.getElementById('sidebar-nav');
@@ -713,7 +713,14 @@ function renderPage(pageId) {
     if (window.lucide) lucide.createIcons();
     afterRenderHooks[pageId] && afterRenderHooks[pageId]();
 }
-const afterRenderHooks = {};
+const afterRenderHooks = {
+    loans: function () {
+        if (loanTab === 'event') {
+            const wrap = document.getElementById('event-items-wrap');
+            if (wrap && !wrap.children.length) addEventItemRow();
+        }
+    }
+};
 
 /* =========================================================
    DASHBOARD
@@ -876,10 +883,11 @@ function deleteItem(itemId) {
 let loanTab = 'pinjam';
 function renderLoansPage() {
     const db = getDB();
-    const approvalCount = db.loans.filter(l => l.status === 'menunggu_admin' || l.status === 'menunggu_manajemen').length;
+    const approvalCount = db.loans.filter(l => l.status === 'menunggu_admin' || l.status === 'menunggu_manajemen_pengembalian').length;
     return `
     <div class="tabs">
         <button class="tab-btn ${loanTab === 'pinjam' ? 'active' : ''}" onclick="switchLoanTab('pinjam')">Ajukan Peminjaman</button>
+        <button class="tab-btn ${loanTab === 'event' ? 'active' : ''}" onclick="switchLoanTab('event')">Peminjaman Event</button>
         <button class="tab-btn ${loanTab === 'persetujuan' ? 'active' : ''}" onclick="switchLoanTab('persetujuan')">Menunggu Persetujuan${approvalCount ? ` (${approvalCount})` : ''}</button>
         <button class="tab-btn ${loanTab === 'aktif' ? 'active' : ''}" onclick="switchLoanTab('aktif')">Sedang Dipinjam</button>
         <button class="tab-btn ${loanTab === 'riwayat' ? 'active' : ''}" onclick="switchLoanTab('riwayat')">Riwayat</button>
@@ -890,7 +898,7 @@ function switchLoanTab(tab) { loanTab = tab; renderPage('loans'); }
 function renderLoanTabContent() {
     const db = getDB();
     if (loanTab === 'pinjam') {
-        const options = db.items.filter(i => i.stock > 0).map(i => `<option value="${i.id}">${escapeHtml(i.name)} (stok: ${i.stock} ${escapeHtml(i.unit || '')})</option>`).join('');
+        const options = db.items.filter(i => i.stock > 0).map(i => `<option value="${i.id}">[${escapeHtml(i.id)}] ${escapeHtml(i.name)} (stok: ${i.stock} ${escapeHtml(i.unit || '')})</option>`).join('');
         return `
         <div class="table-container">
             <div class="modal-body">
@@ -907,55 +915,123 @@ function renderLoanTabContent() {
                         <div class="form-group"><label>Rencana Kembali</label><input type="date" id="loan-return-plan" required></div>
                     </div>
                     <div class="form-group"><label>Keperluan / Catatan</label><textarea id="loan-notes" placeholder="cth: untuk perbaikan mesin di lokasi X"></textarea></div>
-                    <p class="text-muted" style="margin-bottom:12px;">Pengajuan ini akan diproses menunggu persetujuan Admin, lalu Manajemen, sebelum barang boleh diambil.</p>
+                    <p class="text-muted" style="margin-bottom:12px;">Pengajuan ini akan diproses menunggu persetujuan Admin sebelum barang boleh diambil.</p>
                     <button type="submit" class="btn btn-primary">Ajukan Peminjaman</button>
                 </form>
             </div>
         </div>`;
     }
+    if (loanTab === 'event') {
+        return renderEventLoanForm();
+    }
     if (loanTab === 'persetujuan') {
         const u = currentUser();
-        let list = db.loans.filter(l => l.status === 'menunggu_admin' || l.status === 'menunggu_manajemen');
-        if (u.role === 'staff') list = list.filter(l => l.requestedBy === u.name);
-        list = list.sort((a, b) => new Date(b.borrowDate) - new Date(a.borrowDate));
+        let loanList = db.loans.filter(l => l.status === 'menunggu_admin');
+        let returnList = db.loans.filter(l => l.status === 'menunggu_manajemen_pengembalian');
+        if (u.role === 'staff') {
+            loanList = loanList.filter(l => l.requestedBy === u.name);
+            returnList = returnList.filter(l => l.requestedBy === u.name);
+        }
+        loanList = loanList.sort((a, b) => new Date(b.borrowDate) - new Date(a.borrowDate));
+        returnList = returnList.sort((a, b) => new Date(b.returnSubmittedDate) - new Date(a.returnSubmittedDate));
+
+        const { groups: loanGroups, singles: loanSingles } = groupLoansByEvent(loanList);
+        const loanRows = loanSingles.map(l => `<tr>
+            <td><span class="badge badge-info">Peminjaman</span></td>
+            <td>${escapeHtml(l.itemId)}</td><td>${escapeHtml(l.itemName)}</td><td>${l.qty}</td><td>${escapeHtml(l.borrower)}</td>
+            <td>Diajukan oleh ${escapeHtml(l.requestedBy)}</td><td>${fmtDate(l.borrowDate)}</td>
+            <td class="actions">
+                ${hasRole('admin') ? `
+                    <button class="btn btn-sm btn-success" onclick="approveLoanStage('${l.id}','admin')"><i data-lucide="check"></i>Setujui</button>
+                    <button class="btn btn-sm btn-danger" onclick="rejectLoan('${l.id}')"><i data-lucide="x"></i>Tolak</button>
+                ` : '<span class="text-muted">Menunggu proses Admin</span>'}
+            </td>
+        </tr>`).join('') + Object.keys(loanGroups).map(eventId => {
+            const items = loanGroups[eventId];
+            const first = items[0];
+            const itemsSummary = items.map(l => `${escapeHtml(l.itemName)} (${l.qty})`).join(', ');
+            return `<tr>
+                <td><span class="badge badge-purple">Event</span></td>
+                <td colspan="3"><strong>${escapeHtml(first.eventName)}</strong>${first.eventLocation ? ' &middot; ' + escapeHtml(first.eventLocation) : ''}<br><span class="text-muted">${itemsSummary}</span></td>
+                <td>${escapeHtml(first.borrower)}</td>
+                <td>Diajukan oleh ${escapeHtml(first.requestedBy)}</td><td>${fmtDate(first.borrowDate)}</td>
+                <td class="actions">
+                    ${hasRole('admin') ? `
+                        <button class="btn btn-sm btn-success" onclick="approveEventLoan('${eventId}')"><i data-lucide="check"></i>Setujui Semua</button>
+                        <button class="btn btn-sm btn-danger" onclick="rejectEventLoan('${eventId}')"><i data-lucide="x"></i>Tolak Semua</button>
+                    ` : '<span class="text-muted">Menunggu proses Admin</span>'}
+                </td>
+            </tr>`;
+        }).join('');
+
+        const { groups: returnGroups, singles: returnSingles } = groupLoansByEvent(returnList);
+        const returnRows = returnSingles.map(l => `<tr>
+            <td><span class="badge badge-purple">Pengembalian</span></td>
+            <td>${escapeHtml(l.itemId)}</td><td>${escapeHtml(l.itemName)}</td><td>${l.qty}</td><td>${escapeHtml(l.borrower)}</td>
+            <td>Diproses oleh ${escapeHtml(l.returnSubmittedBy)} &middot; Kondisi: ${conditionBadge(l.pendingCondition)}</td><td>${fmtDate(l.returnSubmittedDate)}</td>
+            <td class="actions">
+                ${hasRole('manajemen') ? `
+                    <button class="btn btn-sm btn-success" onclick="approveReturn('${l.id}')"><i data-lucide="check"></i>Setujui</button>
+                    <button class="btn btn-sm btn-danger" onclick="rejectReturn('${l.id}')"><i data-lucide="x"></i>Tolak</button>
+                ` : '<span class="text-muted">Menunggu proses Manajemen</span>'}
+            </td>
+        </tr>`).join('') + Object.keys(returnGroups).map(eventId => {
+            const items = returnGroups[eventId];
+            const first = items[0];
+            const itemsSummary = items.map(l => `${escapeHtml(l.itemName)} (${l.qty}) &middot; ${conditionBadge(l.pendingCondition)}`).join('<br>');
+            return `<tr>
+                <td><span class="badge badge-purple">Pengembalian Event</span></td>
+                <td colspan="3"><strong>${escapeHtml(first.eventName)}</strong><br><span class="text-muted">${itemsSummary}</span></td>
+                <td>${escapeHtml(first.borrower)}</td>
+                <td>Diproses oleh ${escapeHtml(first.returnSubmittedBy)}</td><td>${fmtDate(first.returnSubmittedDate)}</td>
+                <td class="actions">
+                    ${hasRole('manajemen') ? `
+                        <button class="btn btn-sm btn-success" onclick="approveEventReturn('${eventId}')"><i data-lucide="check"></i>Setujui Semua</button>
+                        <button class="btn btn-sm btn-danger" onclick="rejectEventReturn('${eventId}')"><i data-lucide="x"></i>Tolak Semua</button>
+                    ` : '<span class="text-muted">Menunggu proses Manajemen</span>'}
+                </td>
+            </tr>`;
+        }).join('');
+
+        const rows = loanRows + returnRows;
         return `
         <div class="table-container">
             <table class="data-table">
-                <thead><tr><th>Barang</th><th>Jml</th><th>Peminjam</th><th>Diajukan Oleh</th><th>Tgl Pinjam</th><th>Status</th><th>Aksi</th></tr></thead>
+                <thead><tr><th>Jenis</th><th>ID Barang</th><th>Barang</th><th>Jml</th><th>Peminjam</th><th>Keterangan</th><th>Tanggal</th><th>Aksi</th></tr></thead>
                 <tbody>
-                    ${list.length ? list.map(l => `<tr>
-                        <td>${escapeHtml(l.itemName)}</td><td>${l.qty}</td><td>${escapeHtml(l.borrower)}</td>
-                        <td>${escapeHtml(l.requestedBy)}</td><td>${fmtDate(l.borrowDate)}</td>
-                        <td>${loanStatusBadge(l.status)}</td>
-                        <td class="actions">
-                            ${hasRole('admin', 'manajemen') && l.status === 'menunggu_admin' ? `
-                                <button class="btn btn-sm btn-success" onclick="approveLoanStage('${l.id}','admin')"><i data-lucide="check"></i>Setujui (Admin)</button>
-                                <button class="btn btn-sm btn-danger" onclick="rejectLoan('${l.id}')"><i data-lucide="x"></i>Tolak</button>
-                            ` : ''}
-                            ${hasRole('manajemen') && l.status === 'menunggu_manajemen' ? `
-                                <button class="btn btn-sm btn-success" onclick="approveLoanStage('${l.id}','manajemen')"><i data-lucide="check"></i>Setujui (Manajemen)</button>
-                                <button class="btn btn-sm btn-danger" onclick="rejectLoan('${l.id}')"><i data-lucide="x"></i>Tolak</button>
-                            ` : ''}
-                            ${!hasRole('admin', 'manajemen') || (l.status === 'menunggu_manajemen' && !hasRole('manajemen')) ? (hasRole('admin','manajemen') ? '' : '<span class="text-muted">Menunggu proses</span>') : ''}
-                        </td>
-                    </tr>`).join('') : `<tr class="empty-row"><td colspan="7">Tidak ada pengajuan yang menunggu persetujuan.</td></tr>`}
+                    ${rows || `<tr class="empty-row"><td colspan="8">Tidak ada pengajuan yang menunggu persetujuan.</td></tr>`}
                 </tbody>
             </table>
         </div>`;
     }
     if (loanTab === 'aktif') {
         const active = db.loans.filter(l => l.status === 'dipinjam');
+        const { groups: activeGroups, singles: activeSingles } = groupLoansByEvent(active);
+        const singleRows = activeSingles.map(l => `<tr>
+                        <td>${escapeHtml(l.itemId)}</td><td>${escapeHtml(l.itemName)}</td><td>${l.qty}</td><td>${escapeHtml(l.borrower)}</td>
+                        <td>${fmtDate(l.borrowDate)}</td><td>${fmtDate(l.returnPlan)}</td>
+                        <td>${escapeHtml(l.adminApprovedBy || '-')}</td>
+                        ${hasRole('admin', 'manajemen') ? `<td><button class="btn btn-sm btn-success" onclick="openReturnForm('${l.id}')"><i data-lucide="corner-down-left"></i>Proses Pengembalian</button></td>` : ''}
+                    </tr>`).join('');
+        const groupRows = Object.keys(activeGroups).map(eventId => {
+            const items = activeGroups[eventId];
+            const first = items[0];
+            const itemsSummary = items.map(l => `${escapeHtml(l.itemName)} (${l.qty})`).join(', ');
+            return `<tr>
+                <td colspan="3"><span class="badge badge-purple">Event</span> <strong>${escapeHtml(first.eventName)}</strong>${first.eventLocation ? ' &middot; ' + escapeHtml(first.eventLocation) : ''}<br><span class="text-muted">${itemsSummary}</span></td>
+                <td>${escapeHtml(first.borrower)}</td>
+                <td>${fmtDate(first.borrowDate)}</td><td>${fmtDate(first.returnPlan)}</td>
+                <td>${escapeHtml(first.adminApprovedBy || '-')}</td>
+                ${hasRole('admin', 'manajemen') ? `<td><button class="btn btn-sm btn-success" onclick="openEventReturnForm('${eventId}')"><i data-lucide="corner-down-left"></i>Proses Pengembalian Event</button></td>` : ''}
+            </tr>`;
+        }).join('');
+        const rows = singleRows + groupRows;
         return `
         <div class="table-container">
             <table class="data-table">
-                <thead><tr><th>Barang</th><th>Jml</th><th>Peminjam</th><th>Tgl Pinjam</th><th>Rencana Kembali</th><th>Disetujui Oleh</th>${hasRole('admin', 'manajemen') ? '<th>Aksi</th>' : ''}</tr></thead>
+                <thead><tr><th>ID Barang</th><th>Barang</th><th>Jml</th><th>Peminjam</th><th>Tgl Pinjam</th><th>Rencana Kembali</th><th>Disetujui Oleh</th>${hasRole('admin', 'manajemen') ? '<th>Aksi</th>' : ''}</tr></thead>
                 <tbody>
-                    ${active.length ? active.map(l => `<tr>
-                        <td>${escapeHtml(l.itemName)}</td><td>${l.qty}</td><td>${escapeHtml(l.borrower)}</td>
-                        <td>${fmtDate(l.borrowDate)}</td><td>${fmtDate(l.returnPlan)}</td>
-                        <td>${escapeHtml(l.adminApprovedBy || '-')} &amp; ${escapeHtml(l.managementApprovedBy || '-')}</td>
-                        ${hasRole('admin', 'manajemen') ? `<td><button class="btn btn-sm btn-success" onclick="openReturnForm('${l.id}')"><i data-lucide="corner-down-left"></i>Proses Pengembalian</button></td>` : ''}
-                    </tr>`).join('') : `<tr class="empty-row"><td colspan="7">Tidak ada peminjaman aktif.</td></tr>`}
+                    ${rows || `<tr class="empty-row"><td colspan="8">Tidak ada peminjaman aktif.</td></tr>`}
                 </tbody>
             </table>
         </div>`;
@@ -966,21 +1042,21 @@ function renderLoanTabContent() {
     return `
     <div class="table-container">
         <table class="data-table">
-            <thead><tr><th>Barang</th><th>Jml</th><th>Peminjam</th><th>Tgl Pinjam</th><th>Status</th><th>Detail</th></tr></thead>
+            <thead><tr><th>ID Barang</th><th>Barang</th><th>Jml</th><th>Peminjam</th><th>Tgl Pinjam</th><th>Status</th><th>Detail</th></tr></thead>
             <tbody>
                 ${done.length ? done.map(l => `<tr>
-                    <td>${escapeHtml(l.itemName)}</td><td>${l.qty}</td><td>${escapeHtml(l.borrower)}</td>
+                    <td>${escapeHtml(l.itemId)}</td><td>${escapeHtml(l.itemName)}</td><td>${l.qty}</td><td>${escapeHtml(l.borrower)}${l.eventName ? `<br><span class="badge badge-purple" style="margin-top:4px;">Event: ${escapeHtml(l.eventName)}</span>` : ''}</td>
                     <td>${fmtDate(l.borrowDate)}</td>
                     <td>${l.status === 'ditolak' ? '<span class="badge badge-danger">Ditolak</span>' : conditionBadge(l.condition)}</td>
-                    <td>${l.status === 'ditolak' ? `Ditolak oleh ${escapeHtml(l.rejectedBy || '-')}${l.rejectReason ? ': ' + escapeHtml(l.rejectReason) : ''}` : `Kembali: ${fmtDate(l.returnDate)}`}</td>
-                </tr>`).join('') : `<tr class="empty-row"><td colspan="6">Belum ada riwayat.</td></tr>`}
+                    <td>${l.status === 'ditolak' ? `Ditolak oleh ${escapeHtml(l.rejectedBy || '-')}${l.rejectReason ? ': ' + escapeHtml(l.rejectReason) : ''}` : `Kembali: ${fmtDate(l.returnDate)} (disetujui ${escapeHtml(l.returnApprovedBy || '-')})`}</td>
+                </tr>`).join('') : `<tr class="empty-row"><td colspan="7">Belum ada riwayat.</td></tr>`}
             </tbody>
         </table>
     </div>`;
 }
 function loanStatusBadge(status) {
     if (status === 'menunggu_admin') return '<span class="badge badge-warning">Menunggu Admin</span>';
-    if (status === 'menunggu_manajemen') return '<span class="badge badge-info">Menunggu Manajemen</span>';
+    if (status === 'menunggu_manajemen_pengembalian') return '<span class="badge badge-purple">Menunggu Manajemen</span>';
     if (status === 'dipinjam') return '<span class="badge badge-success">Aktif</span>';
     if (status === 'ditolak') return '<span class="badge badge-danger">Ditolak</span>';
     return '-';
@@ -989,6 +1065,7 @@ function conditionBadge(cond) {
     if (cond === 'baik') return '<span class="badge badge-success">Baik</span>';
     if (cond === 'rusak') return '<span class="badge badge-danger">Rusak</span>';
     if (cond === 'mt') return '<span class="badge badge-warning">Perlu Maintenance</span>';
+    if (cond === 'hilang') return '<span class="badge badge-danger">Hilang</span>';
     return '-';
 }
 function submitLoanForm(e) {
@@ -998,7 +1075,7 @@ function submitLoanForm(e) {
     const item = db.items.find(i => i.id === itemId);
     const qty = Number(document.getElementById('loan-qty').value);
     if (!item || qty < 1 || qty > item.stock) { toast('Jumlah melebihi stok tersedia.', 'danger'); return; }
-    // Stok BELUM dikurangi di sini - baru dikurangi setelah disetujui Admin & Manajemen
+    // Stok BELUM dikurangi di sini - baru dikurangi setelah disetujui Admin
     db.loans.push({
         id: uid('loan'), itemId, itemName: item.name, qty,
         borrower: document.getElementById('loan-borrower').value.trim(),
@@ -1012,20 +1089,179 @@ function submitLoanForm(e) {
     switchLoanTab('persetujuan');
     renderSidebar();
 }
-// Persetujuan bertingkat: Admin dulu, baru Manajemen. Stok baru dipotong setelah keduanya setuju.
+/* ---------- Form Peminjaman Event (banyak barang sekaligus) ----------
+   Semua barang yang dipilih di form ini digabung dalam satu "paket" (eventId)
+   sehingga diajukan, disetujui, ditolak, dan dikembalikan bersama-sama sebagai
+   satu kesatuan, tanpa perlu memproses satu per satu untuk tiap barang. */
+let eventItemRowSeq = 0;
+let eventLoanItemsCache = null;
+function getEventLoanItems() {
+    if (!eventLoanItemsCache) {
+        const db = getDB();
+        eventLoanItemsCache = db.items.filter(i => i.stock > 0);
+    }
+    return eventLoanItemsCache;
+}
+function renderEventLoanForm() {
+    eventLoanItemsCache = null; // refresh cache stok setiap kali form dibuka
+    return `
+    <div class="table-container">
+        <div class="modal-body">
+            <p class="text-muted" style="margin-bottom:16px;">Gunakan form ini untuk mengajukan peminjaman banyak barang sekaligus untuk keperluan event/acara. Seluruh barang akan diajukan, disetujui, dan dikembalikan sebagai satu paket.</p>
+            <form id="event-loan-form" onsubmit="submitEventLoanForm(event)">
+                <div class="form-row">
+                    <div class="form-group"><label>Nama Event / Acara</label><input type="text" id="event-name" placeholder="cth: Wedding Ibu Sari - Ballroom Hotel X" required></div>
+                    <div class="form-group"><label>Peminjam / PIC Event</label><input type="text" id="event-borrower" value="${escapeHtml(currentUser().name)}" required></div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group"><label>Lokasi Event (opsional)</label><input type="text" id="event-location" placeholder="cth: Hotel X, Jakarta"></div>
+                    <div class="form-group"><label>Tanggal Pinjam</label><input type="date" id="event-date" value="${todayStr()}" required></div>
+                </div>
+                <div class="form-group"><label>Rencana Kembali</label><input type="date" id="event-return-plan" required></div>
+                <div class="form-group"><label>Catatan Umum (opsional)</label><textarea id="event-notes" placeholder="catatan tambahan untuk event ini"></textarea></div>
+
+                <div class="form-group">
+                    <label>Daftar Barang yang Dipinjam</label>
+                    <div id="event-items-wrap"></div>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="addEventItemRow()" style="margin-top:6px;"><i data-lucide="plus"></i>Tambah Barang</button>
+                </div>
+                <p class="text-muted" style="margin:12px 0;">Pengajuan ini akan diproses sebagai satu paket, menunggu persetujuan Admin sebelum seluruh barang boleh diambil.</p>
+                <button type="submit" class="btn btn-primary">Ajukan Peminjaman Event</button>
+            </form>
+        </div>
+    </div>`;
+}
+function addEventItemRow() {
+    const wrap = document.getElementById('event-items-wrap');
+    if (!wrap) return;
+    const rowId = 'evrow-' + (++eventItemRowSeq);
+    const hasItems = getEventLoanItems().length > 0;
+    const div = document.createElement('div');
+    div.className = 'event-item-row';
+    div.id = rowId;
+    div.innerHTML = `
+        <div class="ev-item-search-wrap">
+            <input type="text" class="ev-item-search" placeholder="${hasItems ? 'Cari nama atau ID barang...' : 'Tidak ada barang tersedia'}" autocomplete="off" ${hasItems ? '' : 'disabled'}
+                oninput="onEventItemSearchInput('${rowId}')" onfocus="onEventItemSearchInput('${rowId}')" onblur="hideEventItemDropdownDelayed('${rowId}')">
+            <input type="hidden" class="ev-item-select" value="">
+            <div class="ev-item-dropdown hidden" id="${rowId}-dropdown"></div>
+        </div>
+        <input type="number" class="ev-item-qty" min="1" value="1" required>
+        <button type="button" class="btn-icon text-danger" title="Hapus barang ini" onclick="removeEventItemRow('${rowId}')"><i data-lucide="trash-2"></i></button>
+    `;
+    wrap.appendChild(div);
+    if (window.lucide) lucide.createIcons();
+}
+function removeEventItemRow(rowId) {
+    const el = document.getElementById(rowId);
+    if (el) el.remove();
+}
+/* ---------- Pencarian barang (autocomplete) untuk baris Peminjaman Event ---------- */
+function onEventItemSearchInput(rowId) {
+    const row = document.getElementById(rowId);
+    if (!row) return;
+    const query = row.querySelector('.ev-item-search').value.trim().toLowerCase();
+    const items = getEventLoanItems();
+    const filtered = query
+        ? items.filter(i => i.name.toLowerCase().includes(query) || i.id.toLowerCase().includes(query))
+        : items;
+    renderEventItemDropdown(rowId, filtered.slice(0, 50));
+}
+function renderEventItemDropdown(rowId, items) {
+    const dropdown = document.getElementById(rowId + '-dropdown');
+    if (!dropdown) return;
+    if (!items.length) {
+        dropdown.innerHTML = `<div class="ev-item-dropdown-empty">Barang tidak ditemukan.</div>`;
+    } else {
+        dropdown.innerHTML = items.map(i => `
+            <div class="ev-item-dropdown-item" onmousedown="event.preventDefault(); selectEventItemFromDropdown('${rowId}', '${i.id}')">
+                <span class="ev-item-dropdown-name">${escapeHtml(i.name)}</span>
+                <span class="ev-item-dropdown-meta">[${escapeHtml(i.id)}] &middot; stok: ${i.stock} ${escapeHtml(i.unit || '')}</span>
+            </div>`).join('');
+    }
+    dropdown.classList.remove('hidden');
+}
+function selectEventItemFromDropdown(rowId, itemId) {
+    const row = document.getElementById(rowId);
+    if (!row) return;
+    const item = getEventLoanItems().find(i => i.id === itemId);
+    if (!item) return;
+    row.querySelector('.ev-item-select').value = item.id;
+    row.querySelector('.ev-item-search').value = `[${item.id}] ${item.name} (stok: ${item.stock} ${item.unit || ''})`;
+    hideEventItemDropdown(rowId);
+}
+function hideEventItemDropdown(rowId) {
+    const dropdown = document.getElementById(rowId + '-dropdown');
+    if (dropdown) dropdown.classList.add('hidden');
+}
+function hideEventItemDropdownDelayed(rowId) {
+    setTimeout(() => hideEventItemDropdown(rowId), 150);
+}
+function submitEventLoanForm(e) {
+    e.preventDefault();
+    const db = getDB();
+    const eventName = document.getElementById('event-name').value.trim();
+    const borrower = document.getElementById('event-borrower').value.trim();
+    const location = document.getElementById('event-location').value.trim();
+    const borrowDate = document.getElementById('event-date').value;
+    const returnPlan = document.getElementById('event-return-plan').value;
+    const notes = document.getElementById('event-notes').value.trim();
+
+    const rows = Array.from(document.querySelectorAll('#event-items-wrap .event-item-row'));
+    if (!rows.length) { toast('Tambahkan minimal 1 barang untuk peminjaman event ini.', 'danger'); return; }
+
+    // Gabungkan jumlah jika barang yang sama dipilih di lebih dari satu baris
+    const picked = {};
+    for (const row of rows) {
+        const itemId = row.querySelector('.ev-item-select').value;
+        const qty = Number(row.querySelector('.ev-item-qty').value);
+        if (!itemId) { toast('Pilih barang pada setiap baris yang ditambahkan.', 'danger'); return; }
+        if (!qty || qty < 1) { toast('Jumlah barang harus lebih dari 0.', 'danger'); return; }
+        picked[itemId] = (picked[itemId] || 0) + qty;
+    }
+    for (const itemId in picked) {
+        const item = db.items.find(i => i.id === itemId);
+        if (!item || picked[itemId] > item.stock) {
+            toast(`Jumlah "${item ? item.name : itemId}" melebihi stok tersedia.`, 'danger');
+            return;
+        }
+    }
+
+    const eventId = uid('event');
+    Object.keys(picked).forEach(itemId => {
+        const item = db.items.find(i => i.id === itemId);
+        db.loans.push({
+            id: uid('loan'), itemId, itemName: item.name, qty: picked[itemId],
+            borrower, borrowDate, returnPlan, notes,
+            status: 'menunggu_admin', requestedBy: currentUser().name,
+            eventId, eventName, eventLocation: location
+        });
+    });
+    saveDB(db);
+    toast(`Peminjaman event "${eventName}" berhasil diajukan (${Object.keys(picked).length} jenis barang), menunggu persetujuan Admin.`);
+    switchLoanTab('persetujuan');
+    renderSidebar();
+}
+function groupLoansByEvent(list) {
+    const groups = {};
+    const singles = [];
+    list.forEach(l => {
+        if (l.eventId) {
+            if (!groups[l.eventId]) groups[l.eventId] = [];
+            groups[l.eventId].push(l);
+        } else {
+            singles.push(l);
+        }
+    });
+    return { groups, singles };
+}
+// Persetujuan 1 tahap: cukup Admin. Stok langsung dipotong setelah Admin menyetujui.
 function approveLoanStage(loanId, stage) {
     const db = getDB();
     const loan = db.loans.find(l => l.id === loanId);
     if (!loan) return;
     if (stage === 'admin') {
         if (loan.status !== 'menunggu_admin') return;
-        loan.status = 'menunggu_manajemen';
-        loan.adminApprovedBy = currentUser().name;
-        loan.adminApprovedDate = todayStr();
-        saveDB(db);
-        toast('Peminjaman disetujui Admin, diteruskan ke Manajemen.');
-    } else if (stage === 'manajemen') {
-        if (loan.status !== 'menunggu_manajemen') return;
         const item = db.items.find(i => i.id === loan.itemId);
         if (!item || item.stock < loan.qty) {
             toast('Stok tidak lagi mencukupi. Peminjaman tidak dapat disetujui.', 'danger');
@@ -1033,10 +1269,10 @@ function approveLoanStage(loanId, stage) {
         }
         item.stock -= loan.qty;
         loan.status = 'dipinjam';
-        loan.managementApprovedBy = currentUser().name;
-        loan.managementApprovedDate = todayStr();
+        loan.adminApprovedBy = currentUser().name;
+        loan.adminApprovedDate = todayStr();
         saveDB(db);
-        toast('Peminjaman disetujui Manajemen. Stok diperbarui, barang siap diambil.');
+        toast('Peminjaman disetujui Admin. Stok diperbarui, barang siap diambil.');
     }
     renderPage('loans');
     renderSidebar();
@@ -1055,15 +1291,17 @@ function rejectLoan(loanId) {
     renderPage('loans');
     renderSidebar();
 }
-// Form khusus admin saat pengembalian: pilih kondisi barang; jika Rusak/MT -> munculkan detail kerusakan
+// Form pengembalian: bisa diisi Admin atau Manajemen, tapi hasilnya masih berupa PENGAJUAN,
+// baru final (stok/kerusakan diproses) setelah disetujui Manajemen lewat approveReturn().
 function openReturnForm(loanId) {
-    openModal('Proses Pengembalian Barang (Admin)', `
+    openModal('Ajukan Pengembalian Barang', `
         <form id="return-form" onsubmit="submitReturnForm(event, '${loanId}')">
             <div class="form-group"><label>Kondisi Barang Saat Dikembalikan</label>
                 <select id="return-condition" onchange="toggleDamageFields()" required>
                     <option value="baik">Baik (kembali ke stok)</option>
                     <option value="rusak">Rusak</option>
                     <option value="mt">Perlu Maintenance (MT)</option>
+                    <option value="hilang">Hilang (tidak ditemukan)</option>
                 </select>
             </div>
             <div id="damage-fields" class="hidden">
@@ -1071,42 +1309,277 @@ function openReturnForm(loanId) {
                     <textarea id="damage-desc" placeholder="Jelaskan kondisi kerusakan barang..."></textarea>
                 </div>
             </div>
+            <div id="lost-fields" class="hidden">
+                <div class="form-group"><label>Keterangan Identifikasi Barang Hilang</label>
+                    <textarea id="lost-desc" placeholder="ciri-ciri barang, dugaan penyebab hilang, dsb."></textarea>
+                </div>
+                <div class="form-group"><label>Lokasi Terakhir Terlihat (opsional)</label>
+                    <input type="text" id="lost-location">
+                </div>
+            </div>
             <div class="form-group"><label>Catatan Pengembalian (opsional)</label><textarea id="return-notes"></textarea></div>
-            <button type="submit" class="btn btn-primary">Konfirmasi Pengembalian</button>
+            <p class="text-muted" style="margin-bottom:12px;">Pengajuan ini akan menunggu persetujuan Manajemen sebelum stok/status barang diperbarui.</p>
+            <button type="submit" class="btn btn-primary">Ajukan Pengembalian</button>
         </form>
     `);
 }
 function toggleDamageFields() {
     const val = document.getElementById('return-condition').value;
-    document.getElementById('damage-fields').classList.toggle('hidden', val === 'baik');
+    document.getElementById('damage-fields').classList.toggle('hidden', val !== 'rusak' && val !== 'mt');
+    document.getElementById('lost-fields').classList.toggle('hidden', val !== 'hilang');
 }
 function submitReturnForm(e, loanId) {
     e.preventDefault();
     const db = getDB();
     const loan = db.loans.find(l => l.id === loanId);
+    if (!loan) return;
     const condition = document.getElementById('return-condition').value;
+    loan.status = 'menunggu_manajemen_pengembalian';
+    loan.pendingCondition = condition;
+    loan.pendingDamageDesc = document.getElementById('damage-desc').value.trim();
+    loan.pendingLostDesc = document.getElementById('lost-desc').value.trim();
+    loan.pendingLostLocation = document.getElementById('lost-location').value.trim();
+    loan.pendingReturnNotes = document.getElementById('return-notes').value.trim();
+    loan.returnSubmittedBy = currentUser().name;
+    loan.returnSubmittedDate = todayStr();
+    saveDB(db);
+    closeModal();
+    toast('Pengembalian diajukan, menunggu persetujuan Manajemen.', 'warning');
+    switchLoanTab('persetujuan');
+    renderSidebar();
+}
+// Manajemen menyetujui pengajuan pengembalian -> baru di sini stok/kerusakan/hilang diproses final.
+function approveReturn(loanId) {
+    const db = getDB();
+    const loan = db.loans.find(l => l.id === loanId);
+    if (!loan || loan.status !== 'menunggu_manajemen_pengembalian') return;
+    const condition = loan.pendingCondition;
     loan.status = 'dikembalikan';
     loan.returnDate = todayStr();
     loan.condition = condition;
-    loan.returnNotes = document.getElementById('return-notes').value.trim();
-    loan.processedBy = currentUser().name;
+    loan.returnNotes = loan.pendingReturnNotes || '';
+    loan.processedBy = loan.returnSubmittedBy;
+    loan.returnApprovedBy = currentUser().name;
 
     if (condition === 'baik') {
         const item = db.items.find(i => i.id === loan.itemId);
         if (item) item.stock += loan.qty;
+    } else if (condition === 'hilang') {
+        // Hilang -> tidak kembali ke stok, masuk ke modul Barang Hilang untuk diidentifikasi
+        db.lost.push({
+            id: uid('lost'), itemId: loan.itemId, itemName: loan.itemName, qty: loan.qty,
+            lastLocation: loan.pendingLostLocation || '',
+            description: loan.pendingLostDesc || '',
+            source: 'pengembalian', loanId: loan.id,
+            reportedBy: loan.returnSubmittedBy, date: todayStr(), status: 'dicari'
+        });
     } else {
         // Rusak / MT -> tidak kembali ke stok baik, dicatat di modul Barang Rusak/MT
         db.damages.push({
             id: uid('dmg'), itemId: loan.itemId, itemName: loan.itemName, qty: loan.qty,
-            type: condition, description: document.getElementById('damage-desc').value.trim(),
+            type: condition, description: loan.pendingDamageDesc || '',
             source: 'pengembalian', loanId: loan.id,
-            reportedBy: currentUser().name, date: todayStr(), status: 'menunggu'
+            reportedBy: loan.returnSubmittedBy, date: todayStr(), status: 'menunggu'
         });
     }
+    delete loan.pendingCondition;
+    delete loan.pendingDamageDesc;
+    delete loan.pendingLostDesc;
+    delete loan.pendingLostLocation;
+    delete loan.pendingReturnNotes;
+    saveDB(db);
+    const msg = condition === 'baik' ? 'Pengembalian disetujui & stok diperbarui.'
+        : condition === 'hilang' ? 'Pengembalian disetujui & barang dicatat ke Barang Hilang.'
+        : 'Pengembalian disetujui & dicatat ke Barang Rusak/MT.';
+    toast(msg, condition === 'baik' ? 'success' : 'warning');
+    renderPage('loans');
+    renderSidebar();
+}
+// Manajemen menolak pengajuan pengembalian -> barang kembali berstatus Sedang Dipinjam, diproses ulang dari awal.
+function rejectReturn(loanId) {
+    const db = getDB();
+    const loan = db.loans.find(l => l.id === loanId);
+    if (!loan || loan.status !== 'menunggu_manajemen_pengembalian') return;
+    if (!confirm('Tolak pengajuan pengembalian ini? Barang akan kembali berstatus Sedang Dipinjam.')) return;
+    loan.status = 'dipinjam';
+    delete loan.pendingCondition;
+    delete loan.pendingDamageDesc;
+    delete loan.pendingLostDesc;
+    delete loan.pendingLostLocation;
+    delete loan.pendingReturnNotes;
+    delete loan.returnSubmittedBy;
+    delete loan.returnSubmittedDate;
+    saveDB(db);
+    toast('Pengajuan pengembalian ditolak, kembali ke status Sedang Dipinjam.', 'warning');
+    renderPage('loans');
+    renderSidebar();
+}
+
+/* ---------- Aksi & pengembalian khusus paket Peminjaman Event ---------- */
+// Setujui semua barang dalam satu paket event sekaligus (cukup Admin, 1 tahap,
+// sama seperti peminjaman biasa). Stok dicek dulu untuk semua barang sebelum
+// ada satu pun yang dipotong, supaya tidak terjadi pemotongan stok sebagian.
+function approveEventLoan(eventId) {
+    const db = getDB();
+    const items = db.loans.filter(l => l.eventId === eventId && l.status === 'menunggu_admin');
+    if (!items.length) return;
+    for (const loan of items) {
+        const item = db.items.find(i => i.id === loan.itemId);
+        if (!item || item.stock < loan.qty) {
+            toast(`Stok "${loan.itemName}" tidak lagi mencukupi. Peminjaman event tidak dapat disetujui.`, 'danger');
+            return;
+        }
+    }
+    items.forEach(loan => {
+        const item = db.items.find(i => i.id === loan.itemId);
+        item.stock -= loan.qty;
+        loan.status = 'dipinjam';
+        loan.adminApprovedBy = currentUser().name;
+        loan.adminApprovedDate = todayStr();
+    });
+    saveDB(db);
+    toast(`Peminjaman event "${items[0].eventName}" disetujui Admin (${items.length} jenis barang). Stok diperbarui.`);
+    renderPage('loans');
+    renderSidebar();
+}
+function rejectEventLoan(eventId) {
+    const db = getDB();
+    const items = db.loans.filter(l => l.eventId === eventId && l.status === 'menunggu_admin');
+    if (!items.length) return;
+    const reason = prompt('Alasan penolakan (opsional):', '') || '';
+    items.forEach(loan => {
+        loan.status = 'ditolak';
+        loan.rejectedBy = currentUser().name;
+        loan.rejectedDate = todayStr();
+        loan.rejectReason = reason.trim();
+    });
+    saveDB(db);
+    toast('Pengajuan peminjaman event ditolak (seluruh barang).', 'warning');
+    renderPage('loans');
+    renderSidebar();
+}
+// Form pengembalian event: setiap barang bisa punya kondisi berbeda-beda
+// (baik/rusak/mt/hilang), tapi diajukan sebagai satu paket. Hasilnya tetap
+// berupa PENGAJUAN, baru final setelah disetujui Manajemen lewat approveEventReturn().
+function openEventReturnForm(eventId) {
+    const db = getDB();
+    const items = db.loans.filter(l => l.eventId === eventId && l.status === 'dipinjam');
+    if (!items.length) return;
+    const first = items[0];
+    const rowsHtml = items.map(l => `
+        <div style="padding:12px 0;border-bottom:1px solid var(--border-color);">
+            <div style="font-weight:600;margin-bottom:8px;">${escapeHtml(l.itemName)} <span class="text-muted">(jumlah: ${l.qty})</span></div>
+            <div class="form-group"><label>Kondisi Saat Dikembalikan</label>
+                <select id="evret-cond-${l.id}" onchange="toggleEventDamageFields('${l.id}')" required>
+                    <option value="baik">Baik (kembali ke stok)</option>
+                    <option value="rusak">Rusak</option>
+                    <option value="mt">Perlu Maintenance (MT)</option>
+                    <option value="hilang">Hilang (tidak ditemukan)</option>
+                </select>
+            </div>
+            <div id="evret-fields-${l.id}" class="hidden">
+                <div class="form-group"><label>Deskripsi Kerusakan / Identifikasi Barang Hilang</label>
+                    <textarea id="evret-desc-${l.id}" placeholder="jelaskan kondisi kerusakan atau ciri-ciri barang hilang"></textarea>
+                </div>
+                <div class="form-group"><label>Lokasi Terakhir Terlihat (khusus Hilang, opsional)</label>
+                    <input type="text" id="evret-loc-${l.id}">
+                </div>
+            </div>
+        </div>`).join('');
+    openModal(`Proses Pengembalian Event: ${first.eventName}`, `
+        <form id="event-return-form" onsubmit="submitEventReturnForm(event, '${eventId}')">
+            <p class="text-muted" style="margin-bottom:8px;">Tentukan kondisi masing-masing barang dari event ini saat dikembalikan.</p>
+            ${rowsHtml}
+            <div class="form-group" style="margin-top:12px;"><label>Catatan Pengembalian Umum (opsional)</label><textarea id="evret-notes"></textarea></div>
+            <p class="text-muted" style="margin-bottom:12px;">Pengajuan ini akan menunggu persetujuan Manajemen sebelum stok/status seluruh barang diperbarui.</p>
+            <button type="submit" class="btn btn-primary">Ajukan Pengembalian Event</button>
+        </form>
+    `);
+}
+function toggleEventDamageFields(loanId) {
+    const val = document.getElementById(`evret-cond-${loanId}`).value;
+    document.getElementById(`evret-fields-${loanId}`).classList.toggle('hidden', val === 'baik');
+}
+function submitEventReturnForm(e, eventId) {
+    e.preventDefault();
+    const db = getDB();
+    const items = db.loans.filter(l => l.eventId === eventId && l.status === 'dipinjam');
+    if (!items.length) return;
+    const notes = document.getElementById('evret-notes').value.trim();
+    items.forEach(loan => {
+        const condSel = document.getElementById(`evret-cond-${loan.id}`);
+        const condition = condSel ? condSel.value : 'baik';
+        const desc = document.getElementById(`evret-desc-${loan.id}`);
+        const loc = document.getElementById(`evret-loc-${loan.id}`);
+        loan.status = 'menunggu_manajemen_pengembalian';
+        loan.pendingCondition = condition;
+        loan.pendingDamageDesc = (condition === 'rusak' || condition === 'mt') ? (desc ? desc.value.trim() : '') : '';
+        loan.pendingLostDesc = condition === 'hilang' ? (desc ? desc.value.trim() : '') : '';
+        loan.pendingLostLocation = condition === 'hilang' ? (loc ? loc.value.trim() : '') : '';
+        loan.pendingReturnNotes = notes;
+        loan.returnSubmittedBy = currentUser().name;
+        loan.returnSubmittedDate = todayStr();
+    });
     saveDB(db);
     closeModal();
-    toast(condition === 'baik' ? 'Barang dikembalikan & stok diperbarui.' : 'Barang dikembalikan & dicatat ke Barang Rusak/MT.', condition === 'baik' ? 'success' : 'warning');
-    switchLoanTab('aktif');
+    toast('Pengembalian event diajukan, menunggu persetujuan Manajemen.', 'warning');
+    switchLoanTab('persetujuan');
+    renderSidebar();
+}
+// Manajemen menyetujui pengajuan pengembalian event -> semua barang diproses final sekaligus.
+function approveEventReturn(eventId) {
+    const db = getDB();
+    const items = db.loans.filter(l => l.eventId === eventId && l.status === 'menunggu_manajemen_pengembalian');
+    if (!items.length) return;
+    items.forEach(loan => {
+        const condition = loan.pendingCondition;
+        loan.status = 'dikembalikan';
+        loan.returnDate = todayStr();
+        loan.condition = condition;
+        loan.returnNotes = loan.pendingReturnNotes || '';
+        loan.processedBy = loan.returnSubmittedBy;
+        loan.returnApprovedBy = currentUser().name;
+        if (condition === 'baik') {
+            const item = db.items.find(i => i.id === loan.itemId);
+            if (item) item.stock += loan.qty;
+        } else if (condition === 'hilang') {
+            db.lost.push({
+                id: uid('lost'), itemId: loan.itemId, itemName: loan.itemName, qty: loan.qty,
+                lastLocation: loan.pendingLostLocation || '',
+                description: loan.pendingLostDesc || '',
+                source: 'pengembalian', loanId: loan.id,
+                reportedBy: loan.returnSubmittedBy, date: todayStr(), status: 'dicari'
+            });
+        } else {
+            db.damages.push({
+                id: uid('dmg'), itemId: loan.itemId, itemName: loan.itemName, qty: loan.qty,
+                type: condition, description: loan.pendingDamageDesc || '',
+                source: 'pengembalian', loanId: loan.id,
+                reportedBy: loan.returnSubmittedBy, date: todayStr(), status: 'menunggu'
+            });
+        }
+        delete loan.pendingCondition; delete loan.pendingDamageDesc; delete loan.pendingLostDesc;
+        delete loan.pendingLostLocation; delete loan.pendingReturnNotes;
+    });
+    saveDB(db);
+    toast(`Pengembalian event "${items[0].eventName}" disetujui & seluruh barang diproses.`);
+    renderPage('loans');
+    renderSidebar();
+}
+function rejectEventReturn(eventId) {
+    const db = getDB();
+    const items = db.loans.filter(l => l.eventId === eventId && l.status === 'menunggu_manajemen_pengembalian');
+    if (!items.length) return;
+    if (!confirm('Tolak pengajuan pengembalian event ini? Semua barang akan kembali berstatus Sedang Dipinjam.')) return;
+    items.forEach(loan => {
+        loan.status = 'dipinjam';
+        delete loan.pendingCondition; delete loan.pendingDamageDesc; delete loan.pendingLostDesc;
+        delete loan.pendingLostLocation; delete loan.pendingReturnNotes;
+        delete loan.returnSubmittedBy; delete loan.returnSubmittedDate;
+    });
+    saveDB(db);
+    toast('Pengajuan pengembalian event ditolak, kembali ke status Sedang Dipinjam.', 'warning');
+    renderPage('loans');
     renderSidebar();
 }
 
@@ -1146,7 +1619,20 @@ function openPurchaseForm() {
                     ${options}
                 </select>
             </div>
-            <div class="form-group hidden" id="p-newname-group"><label>Nama Barang Baru</label><input type="text" id="p-newname"></div>
+            <div class="form-group hidden" id="p-newitem-group">
+                <div class="form-row">
+                    <div class="form-group"><label>Nama Barang Baru</label><input type="text" id="p-newname"></div>
+                    <div class="form-group"><label>Kategori</label><input type="text" id="p-newcategory" placeholder="cth: Alat Kerja"></div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group"><label>Satuan</label><input type="text" id="p-newunit" value="pcs"></div>
+                    <div class="form-group"><label>Stok Minimum</label><input type="number" id="p-newminstock" min="0" value="1"></div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group"><label>Lokasi</label><input type="text" id="p-newlocation" placeholder="cth: Gudang Utama"></div>
+                    <div class="form-group"><label>Rak</label><input type="text" id="p-newrack" placeholder="cth: 1"></div>
+                </div>
+            </div>
             <div class="form-row">
                 <div class="form-group"><label>Jumlah</label><input type="number" id="p-qty" min="1" value="1" required></div>
                 <div class="form-group"><label>Harga Satuan (Rp)</label><input type="number" id="p-price" min="0" value="0" required></div>
@@ -1166,7 +1652,7 @@ function openPurchaseForm() {
         </form>
     `);
     document.getElementById('p-item').addEventListener('change', function () {
-        document.getElementById('p-newname-group').classList.toggle('hidden', this.value !== '__new__');
+        document.getElementById('p-newitem-group').classList.toggle('hidden', this.value !== '__new__');
     });
 }
 let pendingInvoiceData = null;
@@ -1192,7 +1678,12 @@ function submitPurchaseForm(e) {
     if (itemSel === '__new__') {
         const name = document.getElementById('p-newname').value.trim();
         if (!name) { toast('Nama barang baru wajib diisi.', 'danger'); return; }
-        item = { id: uid('itm'), name, category: '', stock: 0, unit: 'pcs', location: '', rack: '', minStock: 1 };
+        const category = document.getElementById('p-newcategory').value.trim();
+        const unit = document.getElementById('p-newunit').value.trim() || 'pcs';
+        const minStock = Number(document.getElementById('p-newminstock').value) || 1;
+        const location = document.getElementById('p-newlocation').value.trim();
+        const rack = document.getElementById('p-newrack').value.trim();
+        item = { id: uid('itm'), name, category, stock: 0, unit, location, rack, minStock };
         db.items.push(item);
     } else {
         item = db.items.find(i => i.id === itemSel);
@@ -1500,11 +1991,11 @@ function renderUsersPage() {
             <thead><tr><th>Nama</th><th>Username</th><th>Role</th><th>Aksi</th></tr></thead>
             <tbody>
                 ${db.users.map(u => `<tr>
-                    <td>${escapeHtml(u.name)}</td><td>${escapeHtml(u.username)}</td>
+                    <td>${escapeHtml(u.name)} ${DEFAULT_ACCOUNTS.some(d => d.id === u.id) ? '<span class="badge badge-muted">Bawaan</span>' : ''}</td><td>${escapeHtml(u.username)}</td>
                     <td>${roleBadge(u.role)}</td>
                     <td class="actions">
                         <button class="btn-icon" title="Edit" onclick="openUserForm('${u.id}')"><i data-lucide="pencil"></i></button>
-                        ${u.id !== currentUser().id ? `<button class="btn-icon text-danger" title="Hapus" onclick="deleteUser('${u.id}')"><i data-lucide="trash-2"></i></button>` : ''}
+                        ${u.id !== currentUser().id && !DEFAULT_ACCOUNTS.some(d => d.id === u.id) ? `<button class="btn-icon text-danger" title="Hapus" onclick="deleteUser('${u.id}')"><i data-lucide="trash-2"></i></button>` : ''}
                     </td>
                 </tr>`).join('')}
             </tbody>
@@ -1561,6 +2052,10 @@ function submitUserForm(e, userId) {
     renderPage('users');
 }
 function deleteUser(userId) {
+    if (DEFAULT_ACCOUNTS.some(u => u.id === userId)) {
+        toast('Akun bawaan ini tidak bisa dihapus, supaya selalu bisa login di device manapun.', 'warning');
+        return;
+    }
     if (!confirm('Hapus user ini?')) return;
     const db = getDB();
     db.users = db.users.filter(u => u.id !== userId);
@@ -1572,12 +2067,26 @@ function deleteUser(userId) {
 /* =========================================================
    AUTH & INISIALISASI
    ========================================================= */
+// Akun bawaan (staff/admin/manajemen) selalu bisa dipakai login di device
+// manapun -- tidak tergantung isi localStorage perangkat tersebut -- supaya
+// staff/admin tidak pernah terkunci hanya karena membuka aplikasi di HP/PC
+// baru atau localStorage-nya berbeda dari perangkat lain.
+const DEFAULT_ACCOUNTS = [
+    { id: 'u-staff', username: 'staff', password: 'staff123', name: 'Budi Santoso', role: 'staff' },
+    { id: 'u-admin', username: 'admin', password: 'admin123', name: 'Sari Wijaya', role: 'admin' },
+    { id: 'u-mgr', username: 'manajemen', password: 'manajemen123', name: 'Hendra Kusuma', role: 'manajemen' }
+];
 function doLogin(e) {
     e.preventDefault();
     const username = document.getElementById('login-username').value.trim();
     const password = document.getElementById('login-password').value;
     const db = getDB();
-    const user = db.users.find(u => u.username === username && u.password === password);
+    let user = db.users.find(u => u.username === username && u.password === password);
+    if (!user) {
+        // Fallback: kredensial default tetap berlaku di device ini walau
+        // belum pernah dibuka / datanya beda, sehingga bisa dipakai di mana saja.
+        user = DEFAULT_ACCOUNTS.find(u => u.username === username && u.password === password);
+    }
     if (!user) { toast('Username atau password salah.', 'danger'); return; }
     setSession(user);
     enterApp();
