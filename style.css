@@ -381,6 +381,57 @@ input:focus, select:focus, textarea:focus {
 
 .filter-bar input, .filter-bar select { width: auto; min-width: 200px; }
 
+/* Baris barang dinamis pada form Peminjaman Event */
+.event-item-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+}
+.event-item-row .ev-item-search-wrap { flex: 1; min-width: 0; }
+.event-item-row .ev-item-qty { width: 90px; flex-shrink: 0; }
+.event-item-row .btn-icon { flex-shrink: 0; }
+
+/* Kotak pencarian barang (autocomplete) pada baris Peminjaman Event */
+.ev-item-search-wrap {
+    position: relative;
+}
+.ev-item-search-wrap input[type="text"]:disabled {
+    background: var(--bg-main);
+    cursor: not-allowed;
+}
+.ev-item-dropdown {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    right: 0;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    box-shadow: var(--shadow-md);
+    max-height: 220px;
+    overflow-y: auto;
+    z-index: 50;
+}
+.ev-item-dropdown-item {
+    padding: 8px 12px;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 0.85rem;
+    border-bottom: 1px solid var(--border-color);
+}
+.ev-item-dropdown-item:last-child { border-bottom: none; }
+.ev-item-dropdown-item:hover { background: var(--accent-light); }
+.ev-item-dropdown-name { font-weight: 500; color: var(--text-main); }
+.ev-item-dropdown-meta { font-size: 0.75rem; color: var(--text-muted); }
+.ev-item-dropdown-empty {
+    padding: 10px 12px;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+}
+
 /* File upload box (invoice photo) */
 .upload-box {
     border: 2px dashed var(--border-color);
